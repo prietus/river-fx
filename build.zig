@@ -230,6 +230,8 @@ pub fn build(b: *Build) !void {
         }) |protocol| {
             b.installFile("protocol/" ++ protocol, "share/river-protocols/stable/" ++ protocol);
         }
+        // river-fx: not one of river's protocols, so not in stable/.
+        b.installFile("protocol/river-fx-v1.xml", "share/river-protocols/fx/river-fx-v1.xml");
     }
 
     if (man_pages) {
