@@ -45,12 +45,12 @@ source=(
     "${_zig_deps[@]}"
 )
 noextract=("${_zig_deps[@]%%::*}")
-sha256sums=('SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP')
+sha256sums=('5d36f9db07a6fc0d9019c3c6ae089d81f3522ccb83a73219207df6b2c5291b38'
+            'b2f4c707c8692a0821081abd20372d95b06a8be4d6cf93e4021b3492454546d8'
+            '4b0b57ce37f7bb3a2c2fc76eec93d060830d2c92155bf2a6baa43d61ad05499e'
+            '6eb33184b52f4b8f834c90f539dfb2fc0ec7ce5931896fadb4c3eab720b8c9b8'
+            'd87f720c7a979ad45af7a2006f932d22b03c1d48996f67453e4fca7e308be02d'
+            'c8fe98ed77d92d6ea8aa56017ee1da9bb504a4e1419bc382d0f9fb0bcc39221f')
 
 _zig_flags=(
     --summary all
