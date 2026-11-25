@@ -20,6 +20,7 @@ const util = @import("util.zig");
 const Decoration = @import("Decoration.zig");
 const Output = @import("Output.zig");
 const Scene = @import("Scene.zig");
+const scenefx = @import("scenefx.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
 const Seat = @import("Seat.zig");
 const WmNode = @import("WmNode.zig");
@@ -131,6 +132,12 @@ const RenderingRequested = struct {
     border: Border,
     clip: wlr.Box,
     content_clip: wlr.Box,
+    /// river-fx-v1: 1 is opaque.
+    opacity: f32 = 1,
+    /// river-fx-v1: 0 is square corners.
+    corner_radius: u16 = 0,
+    /// river-fx-v1: 0 is no blur behind the window, 1 the full blur.
+    blur: f32 = 0,
 
     pub const init: RenderingRequested = .{
         .x = 0,
@@ -186,6 +193,10 @@ fullscreen_background: *wlr.SceneRect,
 
 decorations_below: wl.list.Head(Decoration, .link),
 decorations_below_tree: *wlr.SceneTree,
+
+/// river-fx-v1: draws what is behind the window blurred, under its
+/// surfaces. Created the first time the wm asks for blur.
+blur: ?*scenefx.SceneBlur = null,
 
 surfaces: Scene.SaveableSurfaces,
 
@@ -986,6 +997,7 @@ pub fn renderFinish(window: *Window) void {
     }
 
     window.applySurfaceClip(&clip, &content_clip);
+    window.applyEffects();
     inline for (.{ &window.decorations_above, &window.decorations_below }) |decorations| {
         var it = decorations.iterator(.forward);
         while (it.next()) |decoration| {
@@ -1002,6 +1014,75 @@ pub fn renderFinish(window: *Window) void {
     const enabled = !requested.hidden and (window.state == .mapped or window.state == .closing);
     window.tree.node.setEnabled(enabled);
     window.popup_tree.node.setEnabled(enabled);
+}
+
+/// river-fx-v1: opacity and rounded corners on every buffer of the window
+/// (and on the saved ones shown while it closes). Buffers of subsurfaces
+/// that appear later get them with the next render sequence.
+fn applyEffects(window: *Window) void {
+    const requested = &window.rendering_requested;
+    var effects: Effects = .{
+        .opacity = requested.opacity,
+        // Fullscreen windows fill the output: no rounded corners.
+        .corners = .all(if (window.wm_requested.fullscreen != null) 0 else requested.corner_radius),
+    };
+    inline for (.{ window.surfaces.tree, window.surfaces.saved_tree }) |tree| {
+        tree.node.forEachBuffer(*Effects, applyEffectsIter, &effects);
+    }
+
+    const wants_blur = requested.blur > 0 and window.wm_requested.fullscreen == null and
+        window.box.width > 0 and window.box.height > 0;
+    if (wants_blur and window.blur == null) {
+        if (scenefx.SceneBlur.create(window.tree, window.box.width, window.box.height)) |blur| {
+            // Right under the surfaces: above the decorations below the
+            // window (its shadow), which must not be blurred away.
+            blur.node.placeBelow(&window.surfaces.tree.node);
+            window.blur = blur;
+        } else |_| {
+            log.err("out of memory", .{});
+        }
+    }
+    if (window.blur) |blur| {
+        if (wants_blur) {
+            blur.setSize(window.box.width, window.box.height);
+            blur.setCornerRadii(effects.corners);
+            blur.setStrength(requested.blur);
+        }
+        blur.node.setEnabled(wants_blur);
+    }
+}
+
+const Effects = struct {
+    opacity: f32,
+    corners: scenefx.CornerRadii,
+};
+
+fn applyEffectsIter(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, effects: *Effects) void {
+    scenefx.bufferSetOpacity(buffer, effects.opacity);
+    scenefx.bufferSetCornerRadii(buffer, effects.corners);
+}
+
+/// river-fx-v1: with rounded corners the border is one rect the size of the
+/// window plus its borders, rounded, with the window cut out of it.
+fn drawRoundedBorder(window: *Window, content: *const wlr.Box, color: *const [4]f32) void {
+    const requested = &window.rendering_requested;
+    const width = requested.border.width;
+    const radius = requested.corner_radius;
+    inline for (.{ "right", "top", "bottom" }) |edge| {
+        const rect = @field(window.border, edge);
+        rect.node.setEnabled(true);
+        rect.setSize(0, 0);
+    }
+    const ring = window.border.left;
+    ring.node.setEnabled(true);
+    ring.node.setPosition(-@as(i32, width), -@as(i32, width));
+    ring.setSize(content.width + 2 * @as(i32, width), content.height + 2 * @as(i32, width));
+    ring.setColor(color);
+    scenefx.rectSetCornerRadii(ring, .all(radius +| @as(u16, @intCast(@min(width, math.maxInt(u16))))));
+    scenefx.rectSetClippedRegion(ring, .{
+        .area = .{ .x = width, .y = width, .width = content.width, .height = content.height },
+        .corners = .all(radius),
+    });
 }
 
 fn drawBorders(window: *Window) void {
@@ -1024,6 +1105,13 @@ fn drawBorders(window: *Window) void {
             @floatCast(@as(f64, @floatFromInt(border.b)) / math.maxInt(u32)),
             @floatCast(@as(f64, @floatFromInt(border.a)) / math.maxInt(u32)),
         };
+        if (requested.corner_radius > 0 and requested.clip.empty()) {
+            window.drawRoundedBorder(&content, &color);
+            return;
+        }
+        // Square borders: undo what a rounded border left on the first rect.
+        scenefx.rectSetCornerRadii(window.border.left, .{});
+        scenefx.rectSetClippedRegion(window.border.left, .{});
         var left: wlr.Box = .{
             .x = -@as(i32, border.width),
             .y = 0,

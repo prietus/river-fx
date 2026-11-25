@@ -87,6 +87,7 @@ pub fn build(b: *Build) !void {
     scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-layer-shell-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-touch-gestures-v1.xml"));
+    scanner.addCustomProtocol(b.path("protocol/river-fx-v1.xml"));
 
     scanner.addCustomProtocol(b.path("protocol/river-input-management-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-libinput-config-v1.xml"));
@@ -127,6 +128,7 @@ pub fn build(b: *Build) !void {
     scanner.generate("river_xkb_bindings_v1", 3);
     scanner.generate("river_layer_shell_v1", 1);
     scanner.generate("river_touch_gestures_v1", 1);
+    scanner.generate("river_fx_v1", 1);
 
     scanner.generate("river_input_manager_v1", 2);
     scanner.generate("river_libinput_config_v1", 2);
@@ -176,6 +178,12 @@ pub fn build(b: *Build) !void {
         river.root_module.linkSystemLibrary("libevdev", .{});
         river.root_module.linkSystemLibrary("libinput", .{});
         river.root_module.linkSystemLibrary("wayland-server", .{});
+        // SceneFX replaces wlroots' scene graph with one that can draw
+        // effects (opacity, rounded corners, blur, shadows). It exports the
+        // same wlr_scene_* symbols, so it has to come before wlroots: the
+        // dynamic linker binds every wlr_scene_* call, also those made
+        // inside wlroots' own helpers, to the first library that has it.
+        river.root_module.linkSystemLibrary("scenefx-0.5", .{});
         river.root_module.linkSystemLibrary("wlroots-0.20", .{});
         river.root_module.linkSystemLibrary("xkbcommon", .{});
         river.root_module.linkSystemLibrary("pixman-1", .{});

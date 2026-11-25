@@ -7,6 +7,29 @@ SPDX-License-Identifier: CC-BY-SA-4.0
   <img src="logo/logo_text_adaptive_color.svg" width="600em">
 </div>
 
+## river-fx
+
+This is **river-fx**, a fork of [river](https://codeberg.org/river/river)
+that draws with [SceneFX](https://github.com/wlrfx/scenefx) instead of
+wlroots' scene graph, to give window managers what river's protocol cannot
+express: translucent windows, rounded corners and blur.
+
+It differs from river in two things, and tracks it otherwise (branch `fx`,
+currently on river 0.5.2):
+
+- it links SceneFX (0.5, with wlroots 0.20) and uses its renderer;
+- it adds one protocol, [river-fx-v1](protocol/river-fx-v1.xml), with which
+  the window manager sets the opacity, the corner radius and the blur of each
+  window. Borders follow the rounded corners.
+
+Window managers that do not know the protocol work exactly as on river. It
+was written for [rivermonad](https://github.com/prietus/rivermonad), which
+uses it when the compositor offers it.
+
+Building needs `scenefx` besides river's dependencies; the commands are the
+same as for river, below. river-fx is not affiliated with the river project:
+please report its problems here, not to river.
+
 ## Overview
 
 River is a non-monolithic Wayland compositor. Unlike other Wayland compositors,

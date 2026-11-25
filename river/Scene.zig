@@ -101,7 +101,9 @@ pub fn at(scene: *const Scene, lx: f64, ly: f64) ?AtResult {
     const node = scene.interactive_tree.node.at(lx, ly, &sx, &sy) orelse return null;
 
     const surface: ?*wlr.Surface = blk: {
-        if (node.type == .buffer) {
+        // SceneFX has node types zig-wlroots' enum does not know (shadow,
+        // blur): compare the raw values instead of trusting the enum.
+        if (@intFromEnum(node.type) == @intFromEnum(wlr.SceneNode.Type.buffer)) {
             const scene_buffer = wlr.SceneBuffer.fromNode(node);
             if (wlr.SceneSurface.tryFromBuffer(scene_buffer)) |scene_surface| {
                 break :blk scene_surface.surface;

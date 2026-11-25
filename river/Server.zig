@@ -17,7 +17,9 @@ const util = @import("util.zig");
 
 const IdleInhibitManager = @import("IdleInhibitManager.zig");
 const InputManager = @import("InputManager.zig");
+const Fx = @import("Fx.zig");
 const LayerShell = @import("LayerShell.zig");
+const scenefx = @import("scenefx.zig");
 const LibinputConfig = @import("LibinputConfig.zig");
 const LockManager = @import("LockManager.zig");
 const Output = @import("Output.zig");
@@ -103,6 +105,7 @@ wm: WindowManager,
 xkb_bindings: XkbBindings,
 touch_gestures: TouchGestures,
 layer_shell: LayerShell,
+fx: Fx,
 
 xwayland: if (build_options.xwayland) ?*wlr.Xwayland else void = if (build_options.xwayland) null,
 new_xsurface: if (build_options.xwayland) wl.Listener(*wlr.XwaylandSurface) else void =
@@ -133,7 +136,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     var session: ?*wlr.Session = undefined;
     const backend = try wlr.Backend.autocreate(loop, &session);
-    const renderer = try wlr.Renderer.autocreate(backend);
+    const renderer = try scenefx.rendererCreate(backend);
 
     const compositor = try wlr.Compositor.create(wl_server, 6, renderer);
 
@@ -199,6 +202,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
         .xkb_bindings = undefined,
         .touch_gestures = undefined,
         .layer_shell = undefined,
+        .fx = undefined,
     };
 
     if (renderer.getTextureFormats(@backingInt(wlr.BufferCap.dmabuf)) != null) {
@@ -237,6 +241,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
     try server.xkb_bindings.init();
     try server.touch_gestures.init();
     try server.layer_shell.init();
+    try server.fx.init();
     try server.scene.init();
     try server.om.init();
     try server.input_manager.init();
@@ -296,6 +301,7 @@ pub fn deinit(server: *Server) void {
     server.idle_inhibit_manager.deinit();
     server.lock_manager.deinit();
     server.layer_shell.deinit();
+    server.fx.deinit();
 
     server.wl_server.destroy();
 }
@@ -384,6 +390,7 @@ fn blocklist(server: *Server, global: *const wl.Global) bool {
     return global == server.security_context_manager.global or
         global == server.wm.global or
         global == server.layer_shell.global or
+        global == server.fx.global or
         global == server.layer_shell.wlr_shell.global or
         global == server.xkb_bindings.global or
         global == server.touch_gestures.global or
@@ -452,7 +459,7 @@ fn gpuResetRecoverIdle(server: *Server) void {
 
 fn gpuResetRecover(server: *Server) !void {
     log.info("recovering from GPU reset", .{});
-    const new_renderer = try wlr.Renderer.autocreate(server.backend);
+    const new_renderer = try scenefx.rendererCreate(server.backend);
     errdefer new_renderer.destroy();
 
     const new_allocator = try wlr.Allocator.autocreate(server.backend, new_renderer);
