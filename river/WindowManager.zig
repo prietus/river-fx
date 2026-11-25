@@ -452,6 +452,8 @@ fn renderFinish(wm: *WindowManager) void {
             // Ensure windows that are closed but not yet destroyed don't have
             // their borders/decorations rendered.
             if (window.state == .init) {
+                // river-fx-v1: its last content may stay behind, fading out.
+                window.startCloseFade();
                 window.tree.node.reparent(server.scene.hidden_tree);
             }
             if (window.impl == .destroying) {

@@ -21,7 +21,7 @@ global: *wl.Global,
 
 pub fn init(fx: *Fx) !void {
     fx.* = .{
-        .global = try wl.Global.create(server.wl_server, river.FxV1, 1, *Fx, fx, bind),
+        .global = try wl.Global.create(server.wl_server, river.FxV1, 2, *Fx, fx, bind),
     };
 }
 
@@ -63,6 +63,27 @@ fn handleRequest(
             const window = windowFrom(args.window) orelse return;
             window.rendering_requested.blur =
                 @floatCast(@as(f64, @floatFromInt(args.strength)) / math.maxInt(u32));
+        },
+        .set_shadow => |args| {
+            if (!server.wm.ensureRendering()) return;
+            const window = windowFrom(args.window) orelse return;
+            var color: [4]f32 = undefined;
+            inline for (.{ args.r, args.g, args.b, args.a }, 0..) |component, i| {
+                color[i] = @floatCast(@as(f64, @floatFromInt(component)) / math.maxInt(u32));
+            }
+            window.rendering_requested.shadow = .{
+                .radius = @intCast(@min(args.radius, 1024)),
+                .x = math.clamp(args.x, -1024, 1024),
+                .y = math.clamp(args.y, -1024, 1024),
+                .color = color,
+            };
+        },
+        .set_close_fade => |args| {
+            if (!server.wm.ensureRendering()) return;
+            const window = windowFrom(args.window) orelse return;
+            // Not in rendering_requested: that is reset when the window
+            // closes, which is when this is needed.
+            window.close_fade_ms = @min(args.duration, 5000);
         },
         .set_corner_radius => |args| {
             if (!server.wm.ensureRendering()) return;

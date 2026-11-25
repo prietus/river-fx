@@ -19,6 +19,7 @@ const util = @import("util.zig");
 
 const Decoration = @import("Decoration.zig");
 const Output = @import("Output.zig");
+const Ghost = @import("Ghost.zig");
 const Scene = @import("Scene.zig");
 const scenefx = @import("scenefx.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
@@ -54,6 +55,14 @@ pub const FullscreenRequest = union(enum) {
     no_request,
     fullscreen: ?*Output,
     exit,
+};
+
+pub const Shadow = struct {
+    radius: u16 = 0,
+    x: i32 = 0,
+    y: i32 = 0,
+    /// Premultiplied.
+    color: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 pub const Border = struct {
@@ -138,6 +147,8 @@ const RenderingRequested = struct {
     corner_radius: u16 = 0,
     /// river-fx-v1: 0 is no blur behind the window, 1 the full blur.
     blur: f32 = 0,
+    /// river-fx-v1: no shadow if the alpha is 0.
+    shadow: Shadow = .{},
 
     pub const init: RenderingRequested = .{
         .x = 0,
@@ -197,6 +208,14 @@ decorations_below_tree: *wlr.SceneTree,
 /// river-fx-v1: draws what is behind the window blurred, under its
 /// surfaces. Created the first time the wm asks for blur.
 blur: ?*scenefx.SceneBlur = null,
+/// river-fx-v1: created the first time the wm asks for a shadow.
+shadow: ?*scenefx.SceneShadow = null,
+/// river-fx-v1 set_close_fade.
+close_fade_ms: u32 = 0,
+/// The opacity last applied and whether the window was shown with it: what
+/// a close fade starts from.
+shown_opacity: f32 = 1,
+shown: bool = false,
 
 surfaces: Scene.SaveableSurfaces,
 
@@ -867,6 +886,8 @@ pub fn manageFinish(window: *Window) bool {
 
     if (track_configure and window.state == .mapped) {
         window.surfaces.save();
+        // river-fx-v1: the saved buffers are new nodes, without the effects.
+        window.applyEffects();
         window.sendFrameDone();
     }
 
@@ -1012,6 +1033,7 @@ pub fn renderFinish(window: *Window) void {
     // dimensions event is completed.
     // Keeping the nodes enabled while closing is necessary for frame perfection.
     const enabled = !requested.hidden and (window.state == .mapped or window.state == .closing);
+    if (window.state != .init) window.shown = enabled;
     window.tree.node.setEnabled(enabled);
     window.popup_tree.node.setEnabled(enabled);
 }
@@ -1020,7 +1042,11 @@ pub fn renderFinish(window: *Window) void {
 /// (and on the saved ones shown while it closes). Buffers of subsurfaces
 /// that appear later get them with the next render sequence.
 fn applyEffects(window: *Window) void {
+    // Closed: its requested state is reset, but the saved buffers must keep
+    // their look for the close fade.
+    if (window.state == .init) return;
     const requested = &window.rendering_requested;
+    window.shown_opacity = requested.opacity;
     var effects: Effects = .{
         .opacity = requested.opacity,
         // Fullscreen windows fill the output: no rounded corners.
@@ -1050,6 +1076,61 @@ fn applyEffects(window: *Window) void {
         }
         blur.node.setEnabled(wants_blur);
     }
+
+    const sh = &requested.shadow;
+    const wants_shadow = sh.color[3] > 0 and window.wm_requested.fullscreen == null and
+        requested.clip.empty() and window.box.width > 0 and window.box.height > 0;
+    if (wants_shadow and window.shadow == null) {
+        if (scenefx.SceneShadow.create(window.tree, &sh.color)) |shadow| {
+            shadow.node.lowerToBottom();
+            window.shadow = shadow;
+        } else |_| {
+            log.err("out of memory", .{});
+        }
+    }
+    if (window.shadow) |shadow| {
+        if (wants_shadow) {
+            // The shape that casts it: the window with its borders.
+            const bw: i32 = if (requested.border.width > 0 and
+                (requested.corner_radius > 0 or @as(u32, @bitCast(requested.border.edges)) != 0))
+                requested.border.width
+            else
+                0;
+            const r: i32 = sh.radius;
+            const w = window.box.width + 2 * bw;
+            const h = window.box.height + 2 * bw;
+            const corner: u16 = if (requested.corner_radius > 0)
+                requested.corner_radius +| @as(u16, @intCast(@min(bw, math.maxInt(u16))))
+            else
+                0;
+            shadow.node.setPosition(-bw - r + sh.x, -bw - r + sh.y);
+            shadow.setSize(w + 2 * r, h + 2 * r);
+            shadow.setCornerRadius(corner);
+            shadow.setBlurSigma(@floatFromInt(r));
+            shadow.setColor(&sh.color);
+            shadow.setClippedRegion(.{
+                .area = .{ .x = r - sh.x, .y = r - sh.y, .width = w, .height = h },
+                .corners = .all(corner),
+            });
+        }
+        shadow.node.setEnabled(wants_shadow);
+    }
+}
+
+/// river-fx-v1 set_close_fade: called when the saved buffers of a window
+/// that closed are about to be dropped. Hands them to a Ghost instead.
+pub fn startCloseFade(window: *Window) void {
+    if (window.state != .init or !window.surfaces.saved) return;
+    if (window.close_fade_ms == 0 or !window.shown) return;
+    window.shown = false;
+    Ghost.create(
+        window.surfaces.saved_tree,
+        &window.tree.node,
+        window.box.x,
+        window.box.y,
+        window.shown_opacity,
+        window.close_fade_ms,
+    );
 }
 
 const Effects = struct {
@@ -1302,6 +1383,8 @@ pub fn unmap(window: *Window) void {
     log.debug("window '{?s}' unmapped", .{window.getTitle()});
 
     window.surfaces.save();
+    // river-fx-v1: the saved buffers are new nodes, without the effects.
+    window.applyEffects();
 
     assert(window.impl != .destroying);
     assert(window.state == .mapped);

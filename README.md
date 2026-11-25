@@ -19,8 +19,9 @@ currently on river 0.5.2):
 
 - it links SceneFX (0.5, with wlroots 0.20) and uses its renderer;
 - it adds one protocol, [river-fx-v1](protocol/river-fx-v1.xml), with which
-  the window manager sets the opacity, the corner radius and the blur of each
-  window. Borders follow the rounded corners.
+  the window manager sets the opacity, the corner radius, the blur and the
+  shadow of each window, and has windows fade out when they close. Borders
+  and shadows follow the rounded corners.
 
 Window managers that do not know the protocol work exactly as on river. It
 was written for [rivermonad](https://github.com/prietus/rivermonad), which

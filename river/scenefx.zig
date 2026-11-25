@@ -63,3 +63,36 @@ pub const SceneBlur = extern struct {
     extern fn wlr_scene_blur_set_strength(blur: *SceneBlur, strength: f32) void;
     pub const setStrength = wlr_scene_blur_set_strength;
 };
+
+/// A node that draws a blurred, rounded box: a shadow. `width` and `height`
+/// include the blur on every side.
+pub const SceneShadow = extern struct {
+    node: wlr.SceneNode,
+
+    extern fn wlr_scene_shadow_create(
+        parent: *wlr.SceneTree,
+        width: c_int,
+        height: c_int,
+        corner_radius: c_int,
+        blur_sigma: f32,
+        color: *const [4]f32,
+    ) ?*SceneShadow;
+    pub fn create(parent: *wlr.SceneTree, color: *const [4]f32) !*SceneShadow {
+        return wlr_scene_shadow_create(parent, 0, 0, 0, 0, color) orelse error.OutOfMemory;
+    }
+
+    extern fn wlr_scene_shadow_set_size(shadow: *SceneShadow, width: c_int, height: c_int) void;
+    pub const setSize = wlr_scene_shadow_set_size;
+
+    extern fn wlr_scene_shadow_set_corner_radius(shadow: *SceneShadow, corner_radius: c_int) void;
+    pub const setCornerRadius = wlr_scene_shadow_set_corner_radius;
+
+    extern fn wlr_scene_shadow_set_blur_sigma(shadow: *SceneShadow, blur_sigma: f32) void;
+    pub const setBlurSigma = wlr_scene_shadow_set_blur_sigma;
+
+    extern fn wlr_scene_shadow_set_color(shadow: *SceneShadow, color: *const [4]f32) void;
+    pub const setColor = wlr_scene_shadow_set_color;
+
+    extern fn wlr_scene_shadow_set_clipped_region(shadow: *SceneShadow, region: ClippedRegion) void;
+    pub const setClippedRegion = wlr_scene_shadow_set_clipped_region;
+};
