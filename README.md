@@ -22,7 +22,10 @@ currently on river 0.5.2):
   the window manager sets the opacity, the corner radius, the blur and the
   shadow of each window, and has windows fade out when they close. Borders
   and shadows follow the rounded corners. Layer surfaces (bars, launchers,
-  desktop widgets) take rounded corners, blur and shadows by namespace.
+  desktop widgets) take rounded corners, blur and shadows by namespace. The
+  look of the blur (passes, radius, noise, saturation) can be set too. Windows
+  can be dimmed, shrink as they close and cross-fade when they change size;
+  layer surfaces can fade in and out; menus can blur what is behind them.
 
 Window managers that do not know the protocol work exactly as on river. It
 was written for [rivermonad](https://github.com/prietus/rivermonad), which

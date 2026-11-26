@@ -15,6 +15,7 @@ const wl = wayland.server.wl;
 const zwlr = wayland.server.zwlr;
 const river = wayland.server.river;
 
+const scenefx = @import("scenefx.zig");
 const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
@@ -137,6 +138,11 @@ const RenderingState = struct {
 wlr_output: ?*wlr.Output,
 scene_output: ?*wlr.SceneOutput,
 
+/// river-fx: a blurred copy of what the background layer shows on this
+/// output, shared by the layer surfaces that only have the wallpaper behind.
+wallpaper_blur: ?*scenefx.SceneOptimizedBlur = null,
+wallpaper_blur_box: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+
 object: ?*river.OutputV1 = null,
 layer_shell: LayerShellOutput = .{},
 
@@ -180,6 +186,36 @@ destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
 frame: wl.Listener(*wlr.Output) = .init(handleFrame),
 present: wl.Listener(*wlr.Output.event.Present) = .init(handlePresent),
+
+/// river-fx: keep the node of the wallpaper blur where the output is, and
+/// only enabled while some layer surface can use it.
+pub fn syncWallpaperBlur(output: *Output) void {
+    if (output.wlr_output == null or output.scene_output == null) return;
+    const wanted = server.fx.wallpaperBlurWanted() and output.sent.state == .enabled;
+    const box = output.sent.box();
+    if (wanted and output.wallpaper_blur == null and box.width > 0 and box.height > 0) {
+        output.wallpaper_blur = scenefx.SceneOptimizedBlur.create(server.scene.wallpaper_blur, box.width, box.height) catch null;
+        output.wallpaper_blur_box = .{ .x = 0, .y = 0, .width = box.width, .height = box.height };
+    }
+    const blur = output.wallpaper_blur orelse return;
+    if (wanted) {
+        if (box.x != output.wallpaper_blur_box.x or box.y != output.wallpaper_blur_box.y) {
+            blur.node.setPosition(box.x, box.y);
+        }
+        if (box.width != output.wallpaper_blur_box.width or box.height != output.wallpaper_blur_box.height) {
+            blur.setSize(box.width, box.height);
+        }
+        output.wallpaper_blur_box = box;
+    }
+    blur.node.setEnabled(wanted);
+}
+
+/// river-fx: the wallpaper changed, blur it again.
+pub fn markWallpaperBlurDirty(output: *Output) void {
+    if (output.wallpaper_blur) |blur| {
+        if (blur.node.enabled) blur.markDirty();
+    }
+}
 
 pub fn create(wlr_output: *wlr.Output) !void {
     const output = try util.gpa.create(Output);
@@ -277,6 +313,10 @@ fn handleDestroy(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) v
     // This is part of a workaround for an upstream wlroots bug where certain valid
     // destroy orderings result in assertion failure.
     // TODO(wlroots) https://gitlab.freedesktop.org/wlroots/wlroots/-/work_items/4096
+    if (output.wallpaper_blur) |blur| {
+        blur.node.destroy();
+        output.wallpaper_blur = null;
+    }
     output.scene_output.?.destroy();
     server.om.output_layout.remove(wlr_output);
 

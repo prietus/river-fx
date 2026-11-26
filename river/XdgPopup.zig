@@ -7,6 +7,7 @@ const std = @import("std");
 const wlr = @import("wlroots");
 const wl = @import("wayland").server.wl;
 
+const scenefx = @import("scenefx.zig");
 const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
@@ -17,6 +18,9 @@ const log = std.log.scoped(.xdg_popup);
 
 wlr_popup: *wlr.XdgPopup,
 tree: *wlr.SceneTree,
+/// river-fx-v1 set_popup_blur
+blur: ?*scenefx.SceneBlur = null,
+blur_mask: ?*wlr.SceneBuffer = null,
 capture_tree: ?*wlr.SceneTree = null,
 
 destroy: wl.Listener(void) = .init(handleDestroy),
@@ -58,8 +62,49 @@ fn handleDestroy(listener: *wl.Listener(void)) void {
     util.gpa.destroy(xdg_popup);
 }
 
+/// river-fx-v1 set_popup_blur: blur behind the geometry of the popup,
+/// where the popup itself draws something.
+fn applyBlur(xdg_popup: *XdgPopup) void {
+    const base = xdg_popup.wlr_popup.base;
+    const geometry = base.geometry;
+    const wanted = server.fx.popup_blur > 0 and base.surface.mapped and
+        geometry.width > 0 and geometry.height > 0;
+    if (wanted and xdg_popup.blur == null) {
+        const blur = scenefx.SceneBlur.create(xdg_popup.tree, geometry.width, geometry.height) catch return;
+        blur.node.lowerToBottom();
+        xdg_popup.blur = blur;
+    }
+    const blur = xdg_popup.blur orelse return;
+    if (wanted) {
+        var main: MainBuffer = .{ .surface = base.surface };
+        xdg_popup.tree.node.forEachBuffer(*MainBuffer, mainBufferIter, &main);
+        blur.node.setPosition(geometry.x, geometry.y);
+        blur.setSize(geometry.width, geometry.height);
+        blur.setCornerRadii(.all(server.fx.popup_corner_radius));
+        blur.setStrength(server.fx.popup_blur);
+        if (xdg_popup.blur_mask != main.buffer) {
+            blur.setTransparencyMaskSource(main.buffer);
+            xdg_popup.blur_mask = main.buffer;
+        }
+    }
+    blur.node.setEnabled(wanted);
+}
+
+const MainBuffer = struct {
+    surface: *wlr.Surface,
+    buffer: ?*wlr.SceneBuffer = null,
+};
+
+fn mainBufferIter(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, main: *MainBuffer) void {
+    if (wlr.SceneSurface.tryFromBuffer(buffer)) |scene_surface| {
+        if (scene_surface.surface == main.surface) main.buffer = buffer;
+    }
+}
+
 fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
     const xdg_popup: *XdgPopup = @fieldParentPtr("commit", listener);
+
+    xdg_popup.applyBlur();
 
     if (xdg_popup.wlr_popup.base.initial_commit) {
         handleReposition(&xdg_popup.reposition);

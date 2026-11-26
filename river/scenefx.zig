@@ -63,6 +63,10 @@ pub const SceneBlur = extern struct {
     extern fn wlr_scene_blur_set_strength(blur: *SceneBlur, strength: f32) void;
     pub const setStrength = wlr_scene_blur_set_strength;
 
+    extern fn wlr_scene_blur_set_should_only_blur_bottom_layer(blur: *SceneBlur, only: bool) void;
+    /// Use the texture of the SceneOptimizedBlur instead of blurring.
+    pub const setOnlyBlurBottomLayer = wlr_scene_blur_set_should_only_blur_bottom_layer;
+
     extern fn wlr_scene_blur_set_transparency_mask_source(blur: *SceneBlur, source: ?*wlr.SceneBuffer) void;
     /// Blur only where this buffer draws something.
     pub const setTransparencyMaskSource = wlr_scene_blur_set_transparency_mask_source;
@@ -100,3 +104,45 @@ pub const SceneShadow = extern struct {
     extern fn wlr_scene_shadow_set_clipped_region(shadow: *SceneShadow, region: ClippedRegion) void;
     pub const setClippedRegion = wlr_scene_shadow_set_clipped_region;
 };
+
+/// Draws everything under it in the scene blurred, once, into a texture
+/// that blur nodes set to "only blur the bottom layer" reuse.
+pub const SceneOptimizedBlur = extern struct {
+    node: wlr.SceneNode,
+
+    extern fn wlr_scene_optimized_blur_create(parent: *wlr.SceneTree, width: c_int, height: c_int) ?*SceneOptimizedBlur;
+    pub fn create(parent: *wlr.SceneTree, width: c_int, height: c_int) !*SceneOptimizedBlur {
+        return wlr_scene_optimized_blur_create(parent, width, height) orelse error.OutOfMemory;
+    }
+
+    extern fn wlr_scene_optimized_blur_set_size(blur: *SceneOptimizedBlur, width: c_int, height: c_int) void;
+    pub const setSize = wlr_scene_optimized_blur_set_size;
+
+    extern fn wlr_scene_optimized_blur_mark_dirty(blur: *SceneOptimizedBlur) void;
+    pub const markDirty = wlr_scene_optimized_blur_mark_dirty;
+};
+
+pub const BlurData = extern struct {
+    num_passes: c_int,
+    radius: f32,
+    noise: f32,
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+
+    extern fn blur_data_get_default() BlurData;
+    pub const default = blur_data_get_default;
+};
+
+extern fn wlr_scene_set_blur_data(
+    scene: *wlr.Scene,
+    num_passes: c_int,
+    radius: c_int,
+    noise: f32,
+    brightness: f32,
+    contrast: f32,
+    saturation: f32,
+) void;
+pub fn sceneSetBlurData(scene: *wlr.Scene, data: BlurData) void {
+    wlr_scene_set_blur_data(scene, data.num_passes, @intFromFloat(data.radius), data.noise, data.brightness, data.contrast, data.saturation);
+}

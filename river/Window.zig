@@ -149,6 +149,8 @@ const RenderingRequested = struct {
     blur: f32 = 0,
     /// river-fx-v1: no shadow if the alpha is 0.
     shadow: Shadow = .{},
+    /// river-fx-v1: 0 is not darkened.
+    dim: f32 = 0,
 
     pub const init: RenderingRequested = .{
         .x = 0,
@@ -210,8 +212,17 @@ decorations_below_tree: *wlr.SceneTree,
 blur: ?*scenefx.SceneBlur = null,
 /// river-fx-v1: created the first time the wm asks for a shadow.
 shadow: ?*scenefx.SceneShadow = null,
-/// river-fx-v1 set_close_fade.
+/// river-fx-v1 set_close_fade, set_close_scale.
 close_fade_ms: u32 = 0,
+close_scale: f32 = 1,
+/// river-fx-v1 set_resize_fade: the previous content, fading out over the
+/// new one, and the size the saved buffers were taken at.
+resize_fade_ms: u32 = 0,
+resize_ghost: ?*Ghost = null,
+saved_width: c_int = 0,
+saved_height: c_int = 0,
+/// river-fx-v1 set_dim: black over the surfaces.
+dim: ?*wlr.SceneRect = null,
 /// The opacity last applied and whether the window was shown with it: what
 /// a close fade starts from.
 shown_opacity: f32 = 1,
@@ -390,6 +401,9 @@ pub fn destroy(window: *Window) void {
         var it = decorations.safeIterator(.forward);
         while (it.next()) |decoration| decoration.destroy();
     }
+
+    // Its tree is a child of window.tree.
+    if (window.resize_ghost) |ghost| ghost.destroy();
 
     window.tree.node.destroy();
     window.popup_tree.node.destroy();
@@ -885,6 +899,10 @@ pub fn manageFinish(window: *Window) bool {
     };
 
     if (track_configure and window.state == .mapped) {
+        if (!window.surfaces.saved) {
+            window.saved_width = window.box.width;
+            window.saved_height = window.box.height;
+        }
         window.surfaces.save();
         // river-fx-v1: the saved buffers are new nodes, without the effects.
         window.applyEffects();
@@ -1077,6 +1095,26 @@ fn applyEffects(window: *Window) void {
         blur.node.setEnabled(wants_blur);
     }
 
+    const wants_dim = requested.dim > 0 and window.wm_requested.fullscreen == null and
+        window.box.width > 0 and window.box.height > 0;
+    if (wants_dim and window.dim == null) {
+        if (window.tree.createSceneRect(0, 0, &.{ 0, 0, 0, 0 })) |rect| {
+            // Over the surfaces, under the borders.
+            rect.node.placeAbove(&window.surfaces.saved_tree.node);
+            window.dim = rect;
+        } else |_| {
+            log.err("out of memory", .{});
+        }
+    }
+    if (window.dim) |rect| {
+        if (wants_dim) {
+            rect.setSize(window.box.width, window.box.height);
+            rect.setColor(&.{ 0, 0, 0, requested.dim });
+            scenefx.rectSetCornerRadii(rect, effects.corners);
+        }
+        rect.node.setEnabled(wants_dim);
+    }
+
     const sh = &requested.shadow;
     const wants_shadow = sh.color[3] > 0 and window.wm_requested.fullscreen == null and
         requested.clip.empty() and window.box.width > 0 and window.box.height > 0;
@@ -1123,14 +1161,57 @@ pub fn startCloseFade(window: *Window) void {
     if (window.state != .init or !window.surfaces.saved) return;
     if (window.close_fade_ms == 0 or !window.shown) return;
     window.shown = false;
-    Ghost.create(
-        window.surfaces.saved_tree,
-        &window.tree.node,
-        window.box.x,
-        window.box.y,
-        window.shown_opacity,
-        window.close_fade_ms,
-    );
+    const parent = window.tree.node.parent orelse return;
+    const ghost = Ghost.create(parent, .{
+        .opacity = window.shown_opacity,
+        .duration_ms = window.close_fade_ms,
+        .scale = window.close_scale,
+        .width = window.box.width,
+        .height = window.box.height,
+    }) orelse return;
+    ghost.tree.node.placeAbove(&window.tree.node);
+    ghost.tree.node.setPosition(window.box.x, window.box.y);
+    ghost.moveFrom(window.surfaces.saved_tree);
+    ghost.start();
+}
+
+/// river-fx-v1 set_resize_fade: called when the saved buffers of a window
+/// are about to be dropped because it has drawn at its new size. They stay
+/// over the new content, stretched to the new size, and fade out.
+pub fn startResizeFade(window: *Window) void {
+    if (window.state != .mapped or !window.surfaces.saved) return;
+    if (window.resize_fade_ms == 0 or !window.shown or window.resize_ghost != null) return;
+    const old_w = window.saved_width;
+    const old_h = window.saved_height;
+    if (old_w <= 0 or old_h <= 0 or (old_w == window.box.width and old_h == window.box.height)) return;
+
+    const ghost = Ghost.create(window.tree, .{
+        .opacity = window.shown_opacity,
+        .duration_ms = window.resize_fade_ms,
+    }) orelse return;
+    ghost.tree.node.placeAbove(&window.surfaces.saved_tree.node);
+    ghost.moveFrom(window.surfaces.saved_tree);
+    {
+        const fx = @as(f32, @floatFromInt(window.box.width)) / @as(f32, @floatFromInt(old_w));
+        const fy = @as(f32, @floatFromInt(window.box.height)) / @as(f32, @floatFromInt(old_h));
+        var it = ghost.tree.children.iterator(.forward);
+        while (it.next()) |node| {
+            if (@intFromEnum(node.type) != @intFromEnum(wlr.SceneNode.Type.buffer)) continue;
+            const buffer = wlr.SceneBuffer.fromNode(node);
+            if (buffer.dst_width <= 0 or buffer.dst_height <= 0) continue;
+            node.setPosition(
+                @intFromFloat(@as(f32, @floatFromInt(node.x)) * fx),
+                @intFromFloat(@as(f32, @floatFromInt(node.y)) * fy),
+            );
+            buffer.setDestSize(
+                @max(1, @as(c_int, @intFromFloat(@as(f32, @floatFromInt(buffer.dst_width)) * fx))),
+                @max(1, @as(c_int, @intFromFloat(@as(f32, @floatFromInt(buffer.dst_height)) * fy))),
+            );
+        }
+    }
+    ghost.owner = &window.resize_ghost;
+    window.resize_ghost = ghost;
+    ghost.start();
 }
 
 const Effects = struct {

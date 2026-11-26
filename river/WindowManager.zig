@@ -537,6 +537,8 @@ fn renderFinish(wm: *WindowManager) void {
             // buffers until after the next manage sequence (in which the closed event will
             // be sent) for frame perfection.
             if (window.state != .closing) {
+                // river-fx-v1: the old content may stay over the new, fading out.
+                window.startResizeFade();
                 window.surfaces.dropSaved();
             }
         }

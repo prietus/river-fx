@@ -12,6 +12,7 @@ const zwlr = @import("wayland").server.zwlr;
 const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
+const Ghost = @import("Ghost.zig");
 const Output = @import("Output.zig");
 const scenefx = @import("scenefx.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
@@ -40,6 +41,12 @@ configurable: bool = false,
 blur: ?*scenefx.SceneBlur = null,
 blur_mask: ?*wlr.SceneBuffer = null,
 shadow: ?*scenefx.SceneShadow = null,
+/// river-fx-v1 set_layer_fade: how far the surface has faded in (1: done).
+fade: f32 = 1,
+fade_applied: f32 = 1,
+fade_elapsed_ms: u32 = 0,
+fade_ms: u32 = 0,
+fade_timer: ?*wl.EventSource = null,
 
 destroy: wl.Listener(*wlr.LayerSurfaceV1) = wl.Listener(*wlr.LayerSurfaceV1).init(handleDestroy),
 map: wl.Listener(void) = wl.Listener(void).init(handleMap),
@@ -92,6 +99,12 @@ pub fn applyEffects(layer_surface: *LayerSurface) void {
     tree.node.forEachBuffer(*MainBuffer, mainBufferIter, &main);
     if (main.buffer) |buffer| scenefx.bufferSetCornerRadii(buffer, corners);
 
+    var fade = layer_surface.fade;
+    if (fade != layer_surface.fade_applied or fade < 1) {
+        tree.node.forEachBuffer(*f32, opacityIter, &fade);
+        layer_surface.fade_applied = fade;
+    }
+
     const wants_blur = sized and rule != null and rule.?.blur > 0;
     if (wants_blur and layer_surface.blur == null) {
         if (scenefx.SceneBlur.create(tree, width, height)) |blur| {
@@ -105,7 +118,12 @@ pub fn applyEffects(layer_surface: *LayerSurface) void {
         if (wants_blur) {
             blur.setSize(width, height);
             blur.setCornerRadii(corners);
-            blur.setStrength(rule.?.blur);
+            blur.setStrength(rule.?.blur * fade);
+            // With only the wallpaper behind it, the blurred copy of the
+            // wallpaper that the output keeps will do.
+            const state = &wlr_layer_surface.current;
+            blur.setOnlyBlurBottomLayer(state.layer == .bottom or
+                (state.layer == .top and state.exclusive_zone > 0));
             if (layer_surface.blur_mask != main.buffer) {
                 blur.setTransparencyMaskSource(main.buffer);
                 layer_surface.blur_mask = main.buffer;
@@ -132,7 +150,7 @@ pub fn applyEffects(layer_surface: *LayerSurface) void {
             shadow.setSize(width + 2 * r, height + 2 * r);
             shadow.setCornerRadius(rule.?.corner_radius);
             shadow.setBlurSigma(@floatFromInt(r));
-            shadow.setColor(&sh.color);
+            shadow.setColor(&.{ sh.color[0] * fade, sh.color[1] * fade, sh.color[2] * fade, sh.color[3] * fade });
             shadow.setClippedRegion(.{
                 .area = .{ .x = r - sh.x, .y = r - sh.y, .width = width, .height = height },
                 .corners = corners,
@@ -140,6 +158,56 @@ pub fn applyEffects(layer_surface: *LayerSurface) void {
         }
         shadow.node.setEnabled(wants_shadow);
     }
+}
+
+fn opacityIter(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, opacity: *f32) void {
+    scenefx.bufferSetOpacity(buffer, opacity.*);
+}
+
+const fade_step_ms = 16;
+
+/// river-fx-v1 set_layer_fade: the surface appeared, fade it in.
+fn startFadeIn(layer_surface: *LayerSurface) void {
+    const rule = server.fx.layerRule(std.mem.span(layer_surface.wlr_layer_surface.namespace)) orelse return;
+    if (rule.fade_ms == 0) return;
+    if (layer_surface.fade_timer == null) {
+        layer_surface.fade_timer = server.wl_server.getEventLoop().addTimer(*LayerSurface, handleFadeTimer, layer_surface) catch return;
+    }
+    layer_surface.fade = 0;
+    layer_surface.fade_elapsed_ms = 0;
+    layer_surface.fade_ms = rule.fade_ms;
+    layer_surface.fade_timer.?.timerUpdate(fade_step_ms) catch {
+        layer_surface.fade = 1;
+    };
+}
+
+fn handleFadeTimer(layer_surface: *LayerSurface) c_int {
+    layer_surface.fade_elapsed_ms += fade_step_ms;
+    if (layer_surface.fade_elapsed_ms >= layer_surface.fade_ms) {
+        layer_surface.fade = 1;
+    } else {
+        const t = @as(f32, @floatFromInt(layer_surface.fade_elapsed_ms)) / @as(f32, @floatFromInt(layer_surface.fade_ms));
+        // ease out
+        layer_surface.fade = 1 - (1 - t) * (1 - t);
+        layer_surface.fade_timer.?.timerUpdate(fade_step_ms) catch {
+            layer_surface.fade = 1;
+        };
+    }
+    if (layer_surface.wlr_layer_surface.surface.mapped) layer_surface.applyEffects();
+    return 0;
+}
+
+/// river-fx-v1 set_layer_fade: the surface is going away, leave a copy of
+/// what it shows fading out in its place.
+fn startFadeOut(layer_surface: *LayerSurface) void {
+    const rule = server.fx.layerRule(std.mem.span(layer_surface.wlr_layer_surface.namespace)) orelse return;
+    if (rule.fade_ms == 0) return;
+    const tree = layer_surface.scene_layer_surface.tree;
+    const parent = tree.node.parent orelse return;
+    const ghost = Ghost.create(parent, .{ .opacity = layer_surface.fade, .duration_ms = rule.fade_ms }) orelse return;
+    ghost.tree.node.placeAbove(&tree.node);
+    ghost.copyFrom(tree);
+    ghost.start();
 }
 
 const MainBuffer = struct {
@@ -162,6 +230,8 @@ fn handleDestroy(listener: *wl.Listener(*wlr.LayerSurfaceV1), _: *wlr.LayerSurfa
     const layer_surface: *LayerSurface = @fieldParentPtr("destroy", listener);
 
     log.debug("layer surface '{s}' destroyed", .{layer_surface.wlr_layer_surface.namespace});
+
+    if (layer_surface.fade_timer) |timer| timer.remove();
 
     layer_surface.destroy.link.remove();
     layer_surface.map.link.remove();
@@ -186,6 +256,7 @@ fn handleMap(listener: *wl.Listener(void)) void {
 
     log.debug("layer surface '{s}' mapped", .{wlr_layer_surface.namespace});
 
+    layer_surface.startFadeIn();
     layer_surface.applyEffects();
 
     if (wlr_layer_surface.current.keyboard_interactive == .on_demand) {
@@ -209,6 +280,7 @@ fn handleUnmap(listener: *wl.Listener(void)) void {
 
     log.debug("layer surface '{s}' unmapped", .{layer_surface.wlr_layer_surface.namespace});
     layer_surface.configurable = false;
+    layer_surface.startFadeOut();
 
     {
         var it = server.input_manager.seats.iterator(.forward);
@@ -241,6 +313,11 @@ fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
 
     // river-fx-v1: its size may have changed.
     if (wlr_layer_surface.surface.mapped) layer_surface.applyEffects();
+    // river-fx-v1: a new frame of the wallpaper.
+    if (wlr_layer_surface.current.layer == .background) {
+        const wallpaper_output: *Output = @ptrCast(@alignCast(wlr_layer_surface.output.?.data));
+        wallpaper_output.markWallpaperBlurDirty();
+    }
 
     // If the layer was changed, move the LayerSurface to the proper tree.
     if (wlr_layer_surface.current.committed.layer) {

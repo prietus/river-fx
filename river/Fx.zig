@@ -14,10 +14,15 @@ const river = wayland.server.river;
 const server = &@import("main.zig").server;
 
 const Window = @import("Window.zig");
+const scenefx = @import("scenefx.zig");
 
 const log = std.log.scoped(.wm);
 
 global: *wl.Global,
+
+/// set_popup_blur
+popup_blur: f32 = 0,
+popup_corner_radius: u16 = 0,
 
 /// set_layer_effects: what the wm asked for, by namespace.
 layer_rules: [max_layer_rules]LayerRule = undefined,
@@ -28,9 +33,15 @@ const max_layer_rules = 32;
 pub const LayerRule = struct {
     namespace_buf: [64]u8,
     namespace_len: usize,
-    corner_radius: u16,
-    blur: f32,
-    shadow: Window.Shadow,
+    corner_radius: u16 = 0,
+    blur: f32 = 0,
+    shadow: Window.Shadow = .{},
+    /// set_layer_fade
+    fade_ms: u32 = 0,
+
+    fn empty(rule: *const LayerRule) bool {
+        return rule.corner_radius == 0 and rule.blur == 0 and rule.shadow.color[3] == 0 and rule.fade_ms == 0;
+    }
 
     pub fn namespace(rule: *const LayerRule) []const u8 {
         return rule.namespace_buf[0..rule.namespace_len];
@@ -44,8 +55,18 @@ pub fn layerRule(fx: *const Fx, namespace: []const u8) ?*const LayerRule {
     return null;
 }
 
-fn setLayerRule(fx: *Fx, new: LayerRule) void {
-    const empty = new.corner_radius == 0 and new.blur == 0 and new.shadow.color[3] == 0;
+/// Replace the rule of a namespace, except for what `keep` says to take
+/// from the one it already has.
+fn setLayerRule(fx: *Fx, wanted: LayerRule, keep: enum { fade, effects }) void {
+    var new = wanted;
+    if (fx.layerRule(wanted.namespace())) |old| switch (keep) {
+        .fade => new.fade_ms = old.fade_ms,
+        .effects => {
+            new = old.*;
+            new.fade_ms = wanted.fade_ms;
+        },
+    };
+    const empty = new.empty();
     for (fx.layer_rules[0..fx.layer_rules_len], 0..) |*rule, i| {
         if (!std.mem.eql(u8, rule.namespace(), new.namespace())) continue;
         if (empty) {
@@ -66,13 +87,31 @@ fn setLayerRule(fx: *Fx, new: LayerRule) void {
 }
 
 fn applyLayerRules() void {
+    {
+        var it = server.om.outputs.iterator(.forward);
+        while (it.next()) |output| output.syncWallpaperBlur();
+    }
     var it = server.layer_shell.surfaces.iterator();
     while (it.next()) |layer_surface| layer_surface.applyEffects();
 }
 
+/// Whether some layer surface may want the shared blur of the wallpaper.
+pub fn wallpaperBlurWanted(fx: *const Fx) bool {
+    for (fx.layer_rules[0..fx.layer_rules_len]) |*rule| {
+        if (rule.blur > 0) return true;
+    }
+    return false;
+}
+
+fn setBlurData(data: scenefx.BlurData) void {
+    scenefx.sceneSetBlurData(server.scene.wlr_scene, data);
+    var it = server.om.outputs.iterator(.forward);
+    while (it.next()) |output| output.markWallpaperBlurDirty();
+}
+
 pub fn init(fx: *Fx) !void {
     fx.* = .{
-        .global = try wl.Global.create(server.wl_server, river.FxV1, 3, *Fx, fx, bind),
+        .global = try wl.Global.create(server.wl_server, river.FxV1, 5, *Fx, fx, bind),
     };
 }
 
@@ -92,7 +131,9 @@ fn bind(client: *wl.Client, _: *Fx, version: u32, id: u32) void {
 fn handleDestroy(_: *river.FxV1, _: ?*anyopaque) void {
     // The wm is gone (or restarting): layer surfaces go back to plain.
     server.fx.layer_rules_len = 0;
+    server.fx.popup_blur = 0;
     applyLayerRules();
+    setBlurData(scenefx.BlurData.default());
 }
 
 /// The window behind a river_window_v1 object, unless it is inert (closed).
@@ -160,8 +201,48 @@ fn handleRequest(
             inline for (.{ args.r, args.g, args.b, args.a }, 0..) |component, i| {
                 rule.shadow.color[i] = @floatCast(@as(f64, @floatFromInt(component)) / math.maxInt(u32));
             }
-            server.fx.setLayerRule(rule);
+            server.fx.setLayerRule(rule, .fade);
             applyLayerRules();
+        },
+        .set_layer_fade => |args| {
+            const namespace = std.mem.span(args.namespace);
+            var rule: LayerRule = .{
+                .namespace_buf = undefined,
+                .namespace_len = @min(namespace.len, 64),
+                .fade_ms = @min(args.duration, 5000),
+            };
+            @memcpy(rule.namespace_buf[0..rule.namespace_len], namespace[0..rule.namespace_len]);
+            server.fx.setLayerRule(rule, .effects);
+        },
+        .set_popup_blur => |args| {
+            server.fx.popup_blur = @floatCast(@as(f64, @floatFromInt(args.strength)) / math.maxInt(u32));
+            server.fx.popup_corner_radius = @intCast(@min(args.corner_radius, 1024));
+        },
+        .set_dim => |args| {
+            if (!server.wm.ensureRendering()) return;
+            const window = windowFrom(args.window) orelse return;
+            window.rendering_requested.dim =
+                @floatCast(@as(f64, @floatFromInt(args.strength)) / math.maxInt(u32));
+        },
+        .set_close_scale => |args| {
+            if (!server.wm.ensureRendering()) return;
+            const window = windowFrom(args.window) orelse return;
+            window.close_scale = @floatCast(@as(f64, @floatFromInt(args.scale)) / math.maxInt(u32));
+        },
+        .set_resize_fade => |args| {
+            if (!server.wm.ensureRendering()) return;
+            const window = windowFrom(args.window) orelse return;
+            window.resize_fade_ms = @min(args.duration, 2000);
+        },
+        .set_blur_parameters => |args| {
+            setBlurData(.{
+                .num_passes = @intCast(math.clamp(args.passes, 1, 10)),
+                .radius = @floatFromInt(math.clamp(args.radius, 1, 20)),
+                .noise = @floatCast(math.clamp(args.noise.toDouble(), 0, 1)),
+                .brightness = @floatCast(math.clamp(args.brightness.toDouble(), 0, 2)),
+                .contrast = @floatCast(math.clamp(args.contrast.toDouble(), 0, 2)),
+                .saturation = @floatCast(math.clamp(args.saturation.toDouble(), 0, 2)),
+            });
         },
         .set_corner_radius => |args| {
             if (!server.wm.ensureRendering()) return;

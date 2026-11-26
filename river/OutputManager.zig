@@ -262,6 +262,7 @@ pub fn commitOutputState(om: *OutputManager) void {
             switch (output.sent.state) {
                 .enabled, .disabled_soft => {
                     output.scene_output.?.setPosition(output.sent.x, output.sent.y);
+                    output.syncWallpaperBlur();
                     _ = om.output_layout.add(wlr_output, output.sent.x, output.sent.y) catch {
                         log.err("out of memory", .{});
                         continue; // Try again next time

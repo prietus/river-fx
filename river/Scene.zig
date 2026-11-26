@@ -27,6 +27,10 @@ normal_tree: *wlr.SceneTree,
 /// Direct child of interactive_tree, enabled when the session is locked
 locked_tree: *wlr.SceneTree,
 
+/// river-fx: right above the background layer, holds one node per output
+/// that keeps a blurred copy of the wallpaper (see Output.wallpaper_blur).
+wallpaper_blur: *wlr.SceneTree,
+
 /// All direct children of the normal_tree scene node
 layers: struct {
     /// Background layer shell layer
@@ -72,6 +76,7 @@ pub fn init(scene: *Scene) !void {
         .hidden_tree = hidden_tree,
         .normal_tree = normal_tree,
         .locked_tree = locked_tree,
+        .wallpaper_blur = undefined,
         .layers = .{
             .background = try normal_tree.createSceneTree(),
             .bottom = try normal_tree.createSceneTree(),
@@ -83,6 +88,8 @@ pub fn init(scene: *Scene) !void {
             .override_redirect = if (build_options.xwayland) try normal_tree.createSceneTree(),
         },
     };
+    scene.wallpaper_blur = try normal_tree.createSceneTree();
+    scene.wallpaper_blur.node.placeAbove(&scene.layers.background.node);
 }
 
 pub const AtResult = struct {
@@ -98,7 +105,18 @@ pub const AtResult = struct {
 pub fn at(scene: *const Scene, lx: f64, ly: f64) ?AtResult {
     var sx: f64 = undefined;
     var sy: f64 = undefined;
-    const node = scene.interactive_tree.node.at(lx, ly, &sx, &sy) orelse return null;
+    var node = scene.interactive_tree.node.at(lx, ly, &sx, &sy) orelse return null;
+
+    // river-fx-v1 set_dim: the rect that darkens a window is over its
+    // surfaces but must not take their input.
+    if (SceneNodeData.fromNode(node)) |scene_node_data| {
+        if (scene_node_data.data == .window) {
+            const window = scene_node_data.data.window;
+            if (window.dim != null and node == &window.dim.?.node) {
+                if (window.surfaces.tree.node.at(lx, ly, &sx, &sy)) |under| node = under;
+            }
+        }
+    }
 
     const surface: ?*wlr.Surface = blk: {
         // SceneFX has node types zig-wlroots' enum does not know (shadow,
