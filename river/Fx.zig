@@ -19,9 +19,60 @@ const log = std.log.scoped(.wm);
 
 global: *wl.Global,
 
+/// set_layer_effects: what the wm asked for, by namespace.
+layer_rules: [max_layer_rules]LayerRule = undefined,
+layer_rules_len: usize = 0,
+
+const max_layer_rules = 32;
+
+pub const LayerRule = struct {
+    namespace_buf: [64]u8,
+    namespace_len: usize,
+    corner_radius: u16,
+    blur: f32,
+    shadow: Window.Shadow,
+
+    pub fn namespace(rule: *const LayerRule) []const u8 {
+        return rule.namespace_buf[0..rule.namespace_len];
+    }
+};
+
+pub fn layerRule(fx: *const Fx, namespace: []const u8) ?*const LayerRule {
+    for (fx.layer_rules[0..fx.layer_rules_len]) |*rule| {
+        if (std.mem.eql(u8, rule.namespace(), namespace)) return rule;
+    }
+    return null;
+}
+
+fn setLayerRule(fx: *Fx, new: LayerRule) void {
+    const empty = new.corner_radius == 0 and new.blur == 0 and new.shadow.color[3] == 0;
+    for (fx.layer_rules[0..fx.layer_rules_len], 0..) |*rule, i| {
+        if (!std.mem.eql(u8, rule.namespace(), new.namespace())) continue;
+        if (empty) {
+            fx.layer_rules[i] = fx.layer_rules[fx.layer_rules_len - 1];
+            fx.layer_rules_len -= 1;
+        } else {
+            rule.* = new;
+        }
+        return;
+    }
+    if (empty) return;
+    if (fx.layer_rules_len == max_layer_rules) {
+        log.err("too many layer effects, ignoring those of '{s}'", .{new.namespace()});
+        return;
+    }
+    fx.layer_rules[fx.layer_rules_len] = new;
+    fx.layer_rules_len += 1;
+}
+
+fn applyLayerRules() void {
+    var it = server.layer_shell.surfaces.iterator();
+    while (it.next()) |layer_surface| layer_surface.applyEffects();
+}
+
 pub fn init(fx: *Fx) !void {
     fx.* = .{
-        .global = try wl.Global.create(server.wl_server, river.FxV1, 2, *Fx, fx, bind),
+        .global = try wl.Global.create(server.wl_server, river.FxV1, 3, *Fx, fx, bind),
     };
 }
 
@@ -35,7 +86,13 @@ fn bind(client: *wl.Client, _: *Fx, version: u32, id: u32) void {
         log.err("out of memory", .{});
         return;
     };
-    object.setHandler(?*anyopaque, handleRequest, null, null);
+    object.setHandler(?*anyopaque, handleRequest, handleDestroy, null);
+}
+
+fn handleDestroy(_: *river.FxV1, _: ?*anyopaque) void {
+    // The wm is gone (or restarting): layer surfaces go back to plain.
+    server.fx.layer_rules_len = 0;
+    applyLayerRules();
 }
 
 /// The window behind a river_window_v1 object, unless it is inert (closed).
@@ -84,6 +141,27 @@ fn handleRequest(
             // Not in rendering_requested: that is reset when the window
             // closes, which is when this is needed.
             window.close_fade_ms = @min(args.duration, 5000);
+        },
+        .set_layer_effects => |args| {
+            const namespace = std.mem.span(args.namespace);
+            var rule: LayerRule = .{
+                .namespace_buf = undefined,
+                .namespace_len = @min(namespace.len, 64),
+                .corner_radius = @intCast(@min(args.corner_radius, 1024)),
+                .blur = @floatCast(@as(f64, @floatFromInt(args.blur)) / math.maxInt(u32)),
+                .shadow = .{
+                    .radius = @intCast(@min(args.shadow_radius, 1024)),
+                    .x = math.clamp(args.shadow_x, -1024, 1024),
+                    .y = math.clamp(args.shadow_y, -1024, 1024),
+                    .color = undefined,
+                },
+            };
+            @memcpy(rule.namespace_buf[0..rule.namespace_len], namespace[0..rule.namespace_len]);
+            inline for (.{ args.r, args.g, args.b, args.a }, 0..) |component, i| {
+                rule.shadow.color[i] = @floatCast(@as(f64, @floatFromInt(component)) / math.maxInt(u32));
+            }
+            server.fx.setLayerRule(rule);
+            applyLayerRules();
         },
         .set_corner_radius => |args| {
             if (!server.wm.ensureRendering()) return;

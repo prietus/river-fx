@@ -62,6 +62,10 @@ pub const SceneBlur = extern struct {
 
     extern fn wlr_scene_blur_set_strength(blur: *SceneBlur, strength: f32) void;
     pub const setStrength = wlr_scene_blur_set_strength;
+
+    extern fn wlr_scene_blur_set_transparency_mask_source(blur: *SceneBlur, source: ?*wlr.SceneBuffer) void;
+    /// Blur only where this buffer draws something.
+    pub const setTransparencyMaskSource = wlr_scene_blur_set_transparency_mask_source;
 };
 
 /// A node that draws a blurred, rounded box: a shadow. `width` and `height`

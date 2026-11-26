@@ -13,6 +13,7 @@ const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
 const Output = @import("Output.zig");
+const scenefx = @import("scenefx.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
 const SlotMap = @import("slotmap").SlotMap;
 const XdgPopup = @import("XdgPopup.zig");
@@ -34,6 +35,11 @@ wlr_layer_surface: *wlr.LayerSurfaceV1,
 scene_layer_surface: *wlr.SceneLayerSurfaceV1,
 popup_tree: *wlr.SceneTree,
 configurable: bool = false,
+
+/// river-fx-v1 set_layer_effects: created when a rule first asks for them.
+blur: ?*scenefx.SceneBlur = null,
+blur_mask: ?*wlr.SceneBuffer = null,
+shadow: ?*scenefx.SceneShadow = null,
 
 destroy: wl.Listener(*wlr.LayerSurfaceV1) = wl.Listener(*wlr.LayerSurfaceV1).init(handleDestroy),
 map: wl.Listener(void) = wl.Listener(void).init(handleMap),
@@ -69,6 +75,84 @@ pub fn create(wlr_layer_surface: *wlr.LayerSurfaceV1) error{OutOfMemory}!void {
     wlr_layer_surface.events.new_popup.add(&layer_surface.new_popup);
 }
 
+/// river-fx-v1 set_layer_effects: give the surface the effects of the rule
+/// for its namespace, or none.
+pub fn applyEffects(layer_surface: *LayerSurface) void {
+    const wlr_layer_surface = layer_surface.wlr_layer_surface;
+    const tree = layer_surface.scene_layer_surface.tree;
+    const rule = server.fx.layerRule(std.mem.span(wlr_layer_surface.namespace));
+    const width = wlr_layer_surface.surface.current.width;
+    const height = wlr_layer_surface.surface.current.height;
+    const sized = width > 0 and height > 0;
+    const corners: scenefx.CornerRadii = .all(if (rule) |r| r.corner_radius else 0);
+
+    // The buffer of the surface itself (not of a subsurface): it is what
+    // gets the rounded corners and what masks the blur.
+    var main: MainBuffer = .{ .surface = wlr_layer_surface.surface };
+    tree.node.forEachBuffer(*MainBuffer, mainBufferIter, &main);
+    if (main.buffer) |buffer| scenefx.bufferSetCornerRadii(buffer, corners);
+
+    const wants_blur = sized and rule != null and rule.?.blur > 0;
+    if (wants_blur and layer_surface.blur == null) {
+        if (scenefx.SceneBlur.create(tree, width, height)) |blur| {
+            blur.node.lowerToBottom();
+            layer_surface.blur = blur;
+        } else |_| {
+            log.err("out of memory", .{});
+        }
+    }
+    if (layer_surface.blur) |blur| {
+        if (wants_blur) {
+            blur.setSize(width, height);
+            blur.setCornerRadii(corners);
+            blur.setStrength(rule.?.blur);
+            if (layer_surface.blur_mask != main.buffer) {
+                blur.setTransparencyMaskSource(main.buffer);
+                layer_surface.blur_mask = main.buffer;
+            }
+        }
+        blur.node.setEnabled(wants_blur);
+    }
+
+    const wants_shadow = sized and rule != null and rule.?.shadow.color[3] > 0;
+    if (wants_shadow and layer_surface.shadow == null) {
+        if (scenefx.SceneShadow.create(tree, &rule.?.shadow.color)) |shadow| {
+            layer_surface.shadow = shadow;
+        } else |_| {
+            log.err("out of memory", .{});
+        }
+    }
+    if (layer_surface.shadow) |shadow| {
+        if (wants_shadow) {
+            const sh = &rule.?.shadow;
+            const r: i32 = sh.radius;
+            // Under the blur and the surface.
+            shadow.node.lowerToBottom();
+            shadow.node.setPosition(-r + sh.x, -r + sh.y);
+            shadow.setSize(width + 2 * r, height + 2 * r);
+            shadow.setCornerRadius(rule.?.corner_radius);
+            shadow.setBlurSigma(@floatFromInt(r));
+            shadow.setColor(&sh.color);
+            shadow.setClippedRegion(.{
+                .area = .{ .x = r - sh.x, .y = r - sh.y, .width = width, .height = height },
+                .corners = corners,
+            });
+        }
+        shadow.node.setEnabled(wants_shadow);
+    }
+}
+
+const MainBuffer = struct {
+    surface: *wlr.Surface,
+    buffer: ?*wlr.SceneBuffer = null,
+};
+
+fn mainBufferIter(buffer: *wlr.SceneBuffer, _: c_int, _: c_int, main: *MainBuffer) void {
+    if (wlr.SceneSurface.tryFromBuffer(buffer)) |scene_surface| {
+        if (scene_surface.surface == main.surface) main.buffer = buffer;
+    }
+}
+
 pub fn destroyPopups(layer_surface: *LayerSurface) void {
     var it = layer_surface.wlr_layer_surface.popups.safeIterator(.forward);
     while (it.next()) |wlr_xdg_popup| wlr_xdg_popup.destroy();
@@ -101,6 +185,8 @@ fn handleMap(listener: *wl.Listener(void)) void {
     const wlr_layer_surface = layer_surface.wlr_layer_surface;
 
     log.debug("layer surface '{s}' mapped", .{wlr_layer_surface.namespace});
+
+    layer_surface.applyEffects();
 
     if (wlr_layer_surface.current.keyboard_interactive == .on_demand) {
         var it = server.input_manager.seats.iterator(.forward);
@@ -152,6 +238,9 @@ fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
     assert(wlr_layer_surface.output != null);
 
     if (wlr_layer_surface.initial_commit) layer_surface.configurable = true;
+
+    // river-fx-v1: its size may have changed.
+    if (wlr_layer_surface.surface.mapped) layer_surface.applyEffects();
 
     // If the layer was changed, move the LayerSurface to the proper tree.
     if (wlr_layer_surface.current.committed.layer) {
